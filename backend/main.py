@@ -28,7 +28,7 @@ from api.monitoring import router as monitoring_router
 from api.ai_models_status import router as ai_models_status_router
 from api.ai_cognitive_status import router as ai_cognitive_status_router
 from api.copy_history import router as copy_history_router
-from api.llm_chat import router as llm_chat_router
+# from api.llm_chat import router as llm_chat_router
 from api.analytics_dashboard import router as analytics_dashboard_router
 from api.memories import router as memories_router
 from api.skills import router as skills_router
@@ -458,7 +458,7 @@ app.include_router(monitoring_router)
 app.include_router(ai_models_status_router)
 app.include_router(ai_cognitive_status_router)
 app.include_router(copy_history_router)
-app.include_router(llm_chat_router)
+# app.include_router(llm_chat_router)
 app.include_router(analytics_dashboard_router)
 app.include_router(memories_router)
 app.include_router(skills_router)
@@ -472,29 +472,20 @@ import datetime
 
 @app.get("/api/status")
 async def get_system_status():
-    """Get comprehensive system status"""
-    uptime_seconds = (datetime.datetime.now() - datetime.datetime.fromtimestamp(psutil.boot_time())).total_seconds()
-    uptime_str = str(datetime.timedelta(seconds=int(uptime_seconds)))
+    """Get comprehensive system status, formatted for the frontend."""
     memory = psutil.virtual_memory()
-    cpu = psutil.cpu_percent(interval=0.5)
-    # TODO: Replace with real health check and network latency
+    disk = psutil.disk_usage('/')
+    cpu_percent = psutil.cpu_percent(interval=0.5)
+    running_processes = len(psutil.pids())
+
     return {
-        "system_health": "good",  # Replace with real health check
-        "uptime": uptime_str,
-        "modules": {
-            "security": security_manager.get_status() if hasattr(security_manager, 'get_status') else "online",
-            "memory": True,
-            "copyEngine": True
-        },
-        "memory": {
-            "available": round(memory.available / (1024 ** 3), 2),
-            "total": round(memory.total / (1024 ** 3), 2)
-        },
-        "cpu": {
-            "usage": cpu
-        },
-        "network": {
-            "latency": 10  # Placeholder, replace with real
+        "enhanced_mode": ENHANCED_MODE,
+        "system_info": {
+            "cpu_percent": cpu_percent,
+            "memory_percent": memory.percent,
+            "disk_usage": disk.percent,
+            "running_processes": running_processes,
+            "status": "online"
         }
     }
 

@@ -6,7 +6,9 @@ Provides complete system control capabilities
 import asyncio
 import subprocess
 import os
+import re
 import json
+import sys
 import time
 import logging
 from typing import Dict, List, Any, Optional
@@ -17,24 +19,31 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
-import pyautogui
 import psutil
 import requests
 import boto3
 from pathlib import Path
-import pygetwindow as gw
-import pyautogui
-import threading
-import time
-from typing import Dict, Any, List
 from .calendar_integration import CalendarIntegration
 from core.models import UserSettings, User
 from core.db import get_db
 from collections import defaultdict
+import threading
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Gracefully import GUI-related libraries
+try:
+    import pyautogui
+    import pygetwindow as gw
+    DESKTOP_AUTOMATION_ENABLED = True
+except Exception:
+    DESKTOP_AUTOMATION_ENABLED = False
+    pyautogui = None
+    gw = None
+    logger.warning("Desktop automation libraries (pyautogui, pygetwindow) not available or display not found. Desktop features will be disabled.")
+
 
 calendar_integration = CalendarIntegration()
 
@@ -86,56 +95,27 @@ class AgentModeManager:
         suggestion_cooldown = 5 * 60  # 5 minutes between same suggestion
         while self.is_agent_mode_active(username):
             try:
-                # Fetch user settings
-                with contextlib.closing(next(get_db())) as db:
-                    user = db.query(User).filter_by(username=username).first()
-                    settings = db.query(UserSettings).filter_by(user_id=user.id).first() if user else None
-                    enable_meeting_reminders = settings.enable_meeting_reminders if settings else True
-                    enable_app_suggestions = settings.enable_app_suggestions if settings else True
-                windows = gw.getAllTitles()
-                active_window = gw.getActiveWindow()
-                context = {
-                    "window_titles": windows,
-                    "active_window": active_window.title if active_window else None,
-                }
-                with self._user_lock[username]:
-                    self._user_last_context[username] = context
-                # --- Idle time detection ---
-                idle_time = self._get_idle_time()
-                now = time.time()
-                if idle_time > idle_threshold and now - self._user_last_suggestion_time[(username, 'idle')] > suggestion_cooldown:
-                    suggestion = {
-                        "message": "You've been idle for a while. Would you like to take a break or start a focus block?",
-                        "action": {
-                            "label": "Start Focus Block",
-                            "endpoint": "/api/user/focus/start",
-                            "payload": {"username": username}
-                        }
+                if DESKTOP_AUTOMATION_ENABLED:
+                    # Fetch user settings
+                    with contextlib.closing(next(get_db())) as db:
+                        user = db.query(User).filter_by(username=username).first()
+                        settings = db.query(UserSettings).filter_by(user_id=user.id).first() if user else None
+                        enable_meeting_reminders = settings.enable_meeting_reminders if settings else True
+                        enable_app_suggestions = settings.enable_app_suggestions if settings else True
+                    windows = gw.getAllTitles()
+                    active_window = gw.getActiveWindow()
+                    context = {
+                        "window_titles": windows,
+                        "active_window": active_window.title if active_window else None,
                     }
                     with self._user_lock[username]:
-                        self._user_suggestions[username].append(suggestion)
-                    self._user_last_suggestion_time[(username, 'idle')] = now
-                # --- Focus block logic ---
-                focus_state = self._user_focus_state[username]
-                if focus_state == 'focus':
-                    elapsed = now - (self._user_focus_start[username] or now)
-                    if elapsed > focus_block_length and now - self._user_last_suggestion_time[(username, 'focus_end')] > suggestion_cooldown:
+                        self._user_last_context[username] = context
+                    # --- Idle time detection ---
+                    idle_time = self._get_idle_time()
+                    now = time.time()
+                    if idle_time > idle_threshold and now - self._user_last_suggestion_time[(username, 'idle')] > suggestion_cooldown:
                         suggestion = {
-                            "message": "Focus block complete! Would you like to take a break?",
-                            "action": {
-                                "label": "Start Break",
-                                "endpoint": "/api/user/break/start",
-                                "payload": {"username": username}
-                            }
-                        }
-                        with self._user_lock[username]:
-                            self._user_suggestions[username].append(suggestion)
-                        self._user_last_suggestion_time[(username, 'focus_end')] = now
-                elif focus_state == 'break':
-                    elapsed = now - (self._user_break_start[username] or now)
-                    if elapsed > break_length and now - self._user_last_suggestion_time[(username, 'break_end')] > suggestion_cooldown:
-                        suggestion = {
-                            "message": "Break is over! Ready to start another focus block?",
+                            "message": "You've been idle for a while. Would you like to take a break or start a focus block?",
                             "action": {
                                 "label": "Start Focus Block",
                                 "endpoint": "/api/user/focus/start",
@@ -144,126 +124,156 @@ class AgentModeManager:
                         }
                         with self._user_lock[username]:
                             self._user_suggestions[username].append(suggestion)
-                        self._user_last_suggestion_time[(username, 'break_end')] = now
-                # --- System status suggestions ---
-                cpu = psutil.cpu_percent()
-                mem = psutil.virtual_memory().percent
-                if (cpu > 90 or mem > 90) and now - self._user_last_suggestion_time[(username, 'system_status')] > suggestion_cooldown:
-                    suggestion = {
-                        "message": f"System resources are high (CPU: {cpu}%, Memory: {mem}%). Consider closing unused apps.",
-                        "action": None
-                    }
-                    with self._user_lock[username]:
-                        self._user_suggestions[username].append(suggestion)
-                    self._user_last_suggestion_time[(username, 'system_status')] = now
-                # --- Daily goal reminder ---
-                if not self._user_goal_set[username] and now - self._user_last_suggestion_time[(username, 'goal')] > suggestion_cooldown:
-                    suggestion = {
-                        "message": "Set your daily goal to stay focused!",
-                        "action": {
-                            "label": "Set Goal",
-                            "endpoint": "/api/user/goal/set",
-                            "payload": {"username": username}
-                        }
-                    }
-                    with self._user_lock[username]:
-                        self._user_suggestions[username].append(suggestion)
-                    self._user_last_suggestion_time[(username, 'goal')] = now
-                # --- Existing app and meeting triggers ---
-                if enable_app_suggestions:
-                    triggers = [
-                        ("VS Code", {
-                            "message": "You opened VS Code. Would you like to open your project files?",
-                            "action": {
-                                "label": "Open Project",
-                                "endpoint": "/api/command",
-                                "payload": {"text": "Open my main project in VS Code"}
-                            }
-                        }),
-                        ("Chrome", {
-                            "message": "You opened Chrome. Need help navigating to a site or logging in?",
-                            "action": {
-                                "label": "Go to AWS Console",
-                                "endpoint": "/api/command",
-                                "payload": {"text": "Open AWS Console in Chrome"}
-                            }
-                        }),
-                        ("Word", {
-                            "message": "You opened Word. Want to open a recent document or start a new one?",
-                            "action": None
-                        }),
-                        ("PowerPoint", {
-                            "message": "You opened PowerPoint. Need help with your presentation?",
-                            "action": None
-                        }),
-                        ("Excel", {
-                            "message": "You opened Excel. Would you like to open your budget spreadsheet?",
-                            "action": {
-                                "label": "Open Budget Sheet",
-                                "endpoint": "/api/command",
-                                "payload": {"text": "Open budget.xlsx in Excel"}
-                            }
-                        }),
-                        ("Slack", {
-                            "message": "You opened Slack. Would you like to check unread messages?",
-                            "action": {
-                                "label": "Check Unread",
-                                "endpoint": "/api/command",
-                                "payload": {"text": "Show unread messages in Slack"}
-                            }
-                        }),
-                        ("Zoom", {
-                            "message": "You opened Zoom. Would you like to join your next meeting?",
-                            "action": {
-                                "label": "Join Meeting",
-                                "endpoint": "/api/command",
-                                "payload": {"text": "Join next Zoom meeting"}
-                            }
-                        }),
-                        ("Outlook", {
-                            "message": "You opened Outlook. Would you like to check your inbox or compose a new email?",
-                            "action": {
-                                "label": "New Email",
-                                "endpoint": "/api/command",
-                                "payload": {"text": "Compose new email in Outlook"}
-                            }
-                        }),
-                        ("Notepad", {
-                            "message": "You opened Notepad. Would you like to open your notes?",
-                            "action": {
-                                "label": "Open Notes",
-                                "endpoint": "/api/command",
-                                "payload": {"text": "Open notes.txt in Notepad"}
-                            }
-                        })
-                    ]
-                    for keyword, suggestion in triggers:
-                        if any(keyword.lower() in (t or '').lower() for t in windows):
-                            if keyword not in self._user_last_triggered[username]:
-                                with self._user_lock[username]:
-                                    self._user_suggestions[username].append(suggestion)
-                                self._user_last_triggered[username].add(keyword)
-                        else:
-                            self._user_last_triggered[username].discard(keyword)
-                # Calendar integration: check every 3 cycles (~6s)
-                calendar_check_counter += 1
-                if enable_meeting_reminders and calendar_check_counter % 3 == 0:
-                    meetings = calendar_integration.get_imminent_meetings(minutes=10)
-                    for meeting in meetings:
-                        meeting_id = f"{meeting.get('summary','')}-{meeting.get('start','')}"
-                        if meeting_id not in self._user_last_meeting_ids[username]:
-                            minutes_left = self._minutes_until(meeting.get('start'))
+                        self._user_last_suggestion_time[(username, 'idle')] = now
+                    # --- Focus block logic ---
+                    focus_state = self._user_focus_state[username]
+                    if focus_state == 'focus':
+                        elapsed = now - (self._user_focus_start[username] or now)
+                        if elapsed > focus_block_length and now - self._user_last_suggestion_time[(username, 'focus_end')] > suggestion_cooldown:
                             suggestion = {
-                                "message": f"Your meeting '{meeting.get('summary','(no title)')}' starts in {minutes_left} minutes. Join now?",
+                                "message": "Focus block complete! Would you like to take a break?",
                                 "action": {
-                                    "label": "Join Meeting",
-                                    "endpoint": "/api/command",
-                                    "payload": {"text": f"Open meeting link: {meeting.get('link','')}"}
+                                    "label": "Start Break",
+                                    "endpoint": "/api/user/break/start",
+                                    "payload": {"username": username}
                                 }
                             }
                             with self._user_lock[username]:
                                 self._user_suggestions[username].append(suggestion)
-                            self._user_last_meeting_ids[username].add(meeting_id)
+                            self._user_last_suggestion_time[(username, 'focus_end')] = now
+                    elif focus_state == 'break':
+                        elapsed = now - (self._user_break_start[username] or now)
+                        if elapsed > break_length and now - self._user_last_suggestion_time[(username, 'break_end')] > suggestion_cooldown:
+                            suggestion = {
+                                "message": "Break is over! Ready to start another focus block?",
+                                "action": {
+                                    "label": "Start Focus Block",
+                                    "endpoint": "/api/user/focus/start",
+                                    "payload": {"username": username}
+                                }
+                            }
+                            with self._user_lock[username]:
+                                self._user_suggestions[username].append(suggestion)
+                            self._user_last_suggestion_time[(username, 'break_end')] = now
+                    # --- System status suggestions ---
+                    cpu = psutil.cpu_percent()
+                    mem = psutil.virtual_memory().percent
+                    if (cpu > 90 or mem > 90) and now - self._user_last_suggestion_time[(username, 'system_status')] > suggestion_cooldown:
+                        suggestion = {
+                            "message": f"System resources are high (CPU: {cpu}%, Memory: {mem}%). Consider closing unused apps.",
+                            "action": None
+                        }
+                        with self._user_lock[username]:
+                            self._user_suggestions[username].append(suggestion)
+                        self._user_last_suggestion_time[(username, 'system_status')] = now
+                    # --- Daily goal reminder ---
+                    if not self._user_goal_set[username] and now - self._user_last_suggestion_time[(username, 'goal')] > suggestion_cooldown:
+                        suggestion = {
+                            "message": "Set your daily goal to stay focused!",
+                            "action": {
+                                "label": "Set Goal",
+                                "endpoint": "/api/user/goal/set",
+                                "payload": {"username": username}
+                            }
+                        }
+                        with self._user_lock[username]:
+                            self._user_suggestions[username].append(suggestion)
+                        self._user_last_suggestion_time[(username, 'goal')] = now
+                    # --- Existing app and meeting triggers ---
+                    if enable_app_suggestions:
+                        triggers = [
+                            ("VS Code", {
+                                "message": "You opened VS Code. Would you like to open your project files?",
+                                "action": {
+                                    "label": "Open Project",
+                                    "endpoint": "/api/command",
+                                    "payload": {"text": "Open my main project in VS Code"}
+                                }
+                            }),
+                            ("Chrome", {
+                                "message": "You opened Chrome. Need help navigating to a site or logging in?",
+                                "action": {
+                                    "label": "Go to AWS Console",
+                                    "endpoint": "/api/command",
+                                    "payload": {"text": "Open AWS Console in Chrome"}
+                                }
+                            }),
+                            ("Word", {
+                                "message": "You opened Word. Want to open a recent document or start a new one?",
+                                "action": None
+                            }),
+                            ("PowerPoint", {
+                                "message": "You opened PowerPoint. Need help with your presentation?",
+                                "action": None
+                            }),
+                            ("Excel", {
+                                "message": "You opened Excel. Would you like to open your budget spreadsheet?",
+                                "action": {
+                                    "label": "Open Budget Sheet",
+                                    "endpoint": "/api/command",
+                                    "payload": {"text": "Open budget.xlsx in Excel"}
+                                }
+                            }),
+                            ("Slack", {
+                                "message": "You opened Slack. Would you like to check unread messages?",
+                                "action": {
+                                    "label": "Check Unread",
+                                    "endpoint": "/api/command",
+                                    "payload": {"text": "Show unread messages in Slack"}
+                                }
+                            }),
+                            ("Zoom", {
+                                "message": "You opened Zoom. Would you like to join your next meeting?",
+                                "action": {
+                                    "label": "Join Meeting",
+                                    "endpoint": "/api/command",
+                                    "payload": {"text": "Join next Zoom meeting"}
+                                }
+                            }),
+                            ("Outlook", {
+                                "message": "You opened Outlook. Would you like to check your inbox or compose a new email?",
+                                "action": {
+                                    "label": "New Email",
+                                    "endpoint": "/api/command",
+                                    "payload": {"text": "Compose new email in Outlook"}
+                                }
+                            }),
+                            ("Notepad", {
+                                "message": "You opened Notepad. Would you like to open your notes?",
+                                "action": {
+                                    "label": "Open Notes",
+                                    "endpoint": "/api/command",
+                                    "payload": {"text": "Open notes.txt in Notepad"}
+                                }
+                            })
+                        ]
+                        for keyword, suggestion in triggers:
+                            if any(keyword.lower() in (t or '').lower() for t in windows):
+                                if keyword not in self._user_last_triggered[username]:
+                                    with self._user_lock[username]:
+                                        self._user_suggestions[username].append(suggestion)
+                                    self._user_last_triggered[username].add(keyword)
+                            else:
+                                self._user_last_triggered[username].discard(keyword)
+                    # Calendar integration: check every 3 cycles (~6s)
+                    calendar_check_counter += 1
+                    if enable_meeting_reminders and calendar_check_counter % 3 == 0:
+                        meetings = calendar_integration.get_imminent_meetings(minutes=10)
+                        for meeting in meetings:
+                            meeting_id = f"{meeting.get('summary','')}-{meeting.get('start','')}"
+                            if meeting_id not in self._user_last_meeting_ids[username]:
+                                minutes_left = self._minutes_until(meeting.get('start'))
+                                suggestion = {
+                                    "message": f"Your meeting '{meeting.get('summary','(no title)')}' starts in {minutes_left} minutes. Join now?",
+                                    "action": {
+                                        "label": "Join Meeting",
+                                        "endpoint": "/api/command",
+                                        "payload": {"text": f"Open meeting link: {meeting.get('link','')}"}
+                                    }
+                                }
+                                with self._user_lock[username]:
+                                    self._user_suggestions[username].append(suggestion)
+                                self._user_last_meeting_ids[username].add(meeting_id)
             except Exception as e:
                 with self._user_lock[username]:
                     self._user_last_context[username] = {"error": str(e)}
@@ -271,6 +281,8 @@ class AgentModeManager:
 
     def _get_idle_time(self):
         # Cross-platform idle time detection (simple version)
+        if not DESKTOP_AUTOMATION_ENABLED:
+            return 0
         try:
             if os.name == 'nt':
                 import ctypes
@@ -315,9 +327,10 @@ class SystemAutomation:
     
     def setup_automation(self):
         """Initialize automation tools"""
-        # Setup PyAutoGUI
-        pyautogui.FAILSAFE = True
-        pyautogui.PAUSE = 0.5
+        if DESKTOP_AUTOMATION_ENABLED:
+            # Setup PyAutoGUI
+            pyautogui.FAILSAFE = True
+            pyautogui.PAUSE = 0.5
         
         # Setup Chrome options for automation
         self.chrome_options = Options()
@@ -357,57 +370,95 @@ class SystemAutomation:
     
     async def create_execution_plan(self, task: str) -> List[Dict[str, Any]]:
         """Create detailed execution plan for complex tasks"""
+        task_lower = task.lower()
+        plan = []
+
+        # Rule for launching applications
+        if "launch" in task_lower or "open" in task_lower:
+            if "vs code" in task_lower or "vscode" in task_lower:
+                plan.append({
+                    "type": "system_operation",
+                    "action": "launch_application",
+                    "app_name": "Code",
+                    "description": "Launch Visual Studio Code"
+                })
+            elif "chrome" in task_lower:
+                plan.append({
+                    "type": "system_operation",
+                    "action": "launch_application",
+                    "app_name": "chrome",
+                    "description": "Launch Google Chrome"
+                })
+
+        # Rule for browser navigation
+        if "navigate to" in task_lower:
+            url_match = re.search(r'navigate to (.*)', task, re.IGNORECASE)
+            url = url_match.group(1) if url_match else "https://google.com"
+            if "aws console" in url.lower():
+                url = "https://aws.amazon.com/console/"
+
+            plan.append({
+                "type": "browser_automation",
+                "action": "navigate_to_url",
+                "url": url,
+                "description": f"Navigate to {url}"
+            })
+
+        # Rule for system diagnostics
+        if "run system diagnostic" in task_lower:
+            if os.name == 'nt':
+                 plan.append({
+                    "type": "system_operation",
+                    "action": "run_command",
+                    "command": "sfc /scannow",
+                    "description": "Run System File Checker"
+                })
+            else:
+                plan.append({
+                    "type": "system_operation",
+                    "action": "run_command",
+                    "command": "vm_stat",
+                    "description": "Check virtual memory statistics"
+                })
         
-        # Example for solar pipeline task
-        if "solar" in task.lower() and "pipeline" in task.lower():
-            return [
-                {
-                    "type": "browser_automation",
-                    "action": "open_aws_console",
-                    "description": "Open AWS Console",
-                    "url": "https://aws.amazon.com/console/"
-                },
-                {
-                    "type": "browser_automation", 
-                    "action": "login_aws",
-                    "description": "Login to AWS",
-                    "credentials_source": "environment"
-                },
-                {
-                    "type": "aws_operation",
-                    "action": "create_lambda_function",
-                    "description": "Create Lambda function for solar data processing",
-                    "function_name": "solar-ontario-pipeline",
-                    "runtime": "python3.9"
-                },
-                {
-                    "type": "aws_operation",
-                    "action": "create_s3_bucket",
-                    "description": "Create S3 bucket for solar data storage",
-                    "bucket_name": "solar-ontario-data"
-                },
-                {
-                    "type": "code_generation",
-                    "action": "generate_pipeline_code",
-                    "description": "Generate solar pipeline code",
-                    "language": "python"
-                },
-                {
-                    "type": "aws_operation",
-                    "action": "deploy_pipeline",
-                    "description": "Deploy complete solar pipeline",
-                    "components": ["lambda", "s3", "cloudwatch"]
-                }
-            ]
-        
-        # Generic task breakdown
-        return [
-            {
+        # Rule for monitoring system resources
+        if "monitor system resources" in task_lower:
+            plan.append({
+                "type": "system_operation",
+                "action": "monitor_resources",
+                "duration": 10,
+                "description": "Monitor system resources for 10 seconds"
+            })
+
+        # Rule for creating AWS S3 bucket
+        if "create s3 bucket" in task_lower:
+            bucket_name_match = re.search(r'create s3 bucket for (.*)|create s3 bucket named (.*)', task, re.IGNORECASE)
+            bucket_name = "jarvis-default-bucket"
+            if bucket_name_match:
+                # Find which group matched
+                name = next((g for g in bucket_name_match.groups() if g is not None), None)
+                if name:
+                    bucket_name = name.strip().replace(" ", "-").lower()
+
+            if not bucket_name:
+                bucket_name = f"jarvis-bucket-{int(time.time())}"
+
+            plan.append({
+                "type": "aws_operation",
+                "action": "create_s3_bucket",
+                "bucket_name": bucket_name,
+                "description": f"Create AWS S3 bucket named {bucket_name}"
+            })
+
+        # Fallback for unknown tasks
+        if not plan:
+            plan.append({
                 "type": "analysis",
                 "action": "analyze_task",
-                "description": f"Analyze and break down: {task}"
-            }
-        ]
+                "description": f"Could not create an execution plan for: {task}. Analysis required."
+            })
+
+        return plan
     
     async def execute_step(self, step: Dict[str, Any]) -> Dict[str, Any]:
         """Execute individual step in the execution plan"""
@@ -425,6 +476,10 @@ class SystemAutomation:
             return await self.execute_code_generation(step)
         elif step_type == "file_operation":
             return await self.execute_file_operation(step)
+        elif step_type == "desktop_automation":
+            if not DESKTOP_AUTOMATION_ENABLED:
+                return {"error": "Desktop automation is disabled in this environment."}
+            return await self.control_desktop_application(step.get("app_name"), step.get("actions"))
         else:
             return {"error": f"Unknown step type: {step_type}"}
     
@@ -436,7 +491,13 @@ class SystemAutomation:
             self.driver = webdriver.Chrome(options=self.chrome_options)
         
         try:
-            if action == "open_aws_console":
+            if action == "navigate_to_url":
+                url = step.get("url", "https://google.com")
+                self.driver.get(url)
+                await asyncio.sleep(2)
+                return {"status": "success", "action": f"Navigated to {url}"}
+
+            elif action == "open_aws_console":
                 self.driver.get("https://aws.amazon.com/console/")
                 await asyncio.sleep(2)
                 return {"status": "success", "action": "AWS Console opened"}
@@ -595,6 +656,32 @@ class SystemAutomation:
                 return {
                     "status": "success",
                     "action": f"Directory {directory} created"
+                }
+
+            elif action == "launch_application":
+                app_name = step.get("app_name")
+                try:
+                    if os.name == 'nt': # Windows
+                        os.startfile(app_name)
+                    elif sys.platform == 'darwin': # macOS
+                        subprocess.Popen(['open', '-a', app_name])
+                    else: # Linux
+                        subprocess.Popen([app_name])
+                    return {"status": "success", "action": f"Application {app_name} launched"}
+                except Exception as app_e:
+                    return {"error": f"Could not launch '{app_name}'. Is it installed and in your PATH? Error: {app_e}"}
+
+            elif action == "monitor_resources":
+                duration = step.get("duration", 5)
+                results = []
+                for _ in range(duration):
+                    results.append(await self.monitor_system_resources())
+                    await asyncio.sleep(1)
+
+                return {
+                    "status": "success",
+                    "action": "Resource monitoring complete",
+                    "data": results
                 }
             
             else:
@@ -759,6 +846,8 @@ def store_results(s3_client, insights):
     
     async def control_desktop_application(self, app_name: str, actions: List[str]) -> Dict[str, Any]:
         """Control desktop applications using PyAutoGUI"""
+        if not DESKTOP_AUTOMATION_ENABLED:
+            return {"error": "Desktop automation is disabled in this environment."}
         try:
             # Launch application if not running
             if not self.is_application_running(app_name):
@@ -782,6 +871,8 @@ def store_results(s3_client, insights):
     
     async def execute_desktop_action(self, action: str) -> Dict[str, Any]:
         """Execute desktop actions using PyAutoGUI"""
+        if not DESKTOP_AUTOMATION_ENABLED:
+            return {"error": "Desktop automation is disabled."}
         try:
             if action.startswith("click"):
                 # Parse click coordinates or element
@@ -809,6 +900,8 @@ def store_results(s3_client, insights):
     
     def parse_click_coordinates(self, action: str) -> tuple:
         """Parse click coordinates from action string"""
+        if not DESKTOP_AUTOMATION_ENABLED:
+            return (0, 0)
         # Default center of screen
         screen_width, screen_height = pyautogui.size()
         return (screen_width // 2, screen_height // 2)
