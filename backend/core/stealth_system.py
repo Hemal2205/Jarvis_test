@@ -35,9 +35,9 @@ except ImportError:
 
 try:
     import pyautogui
-except ImportError:
+except (ImportError, KeyError):
     pyautogui = None
-    logging.warning("pyautogui not available - automation features disabled")
+    logging.warning("pyautogui not available or display not found - automation features disabled")
 
 try:
     import speech_recognition as sr
@@ -522,7 +522,8 @@ class ProctoringBypass:
             os.environ['DISPLAY'] = ':0'
             
             # Hide from screen capture
-            pyautogui.FAILSAFE = False
+            if pyautogui:
+                pyautogui.FAILSAFE = False
             
             logger.info("Screen sharing bypass activated")
             

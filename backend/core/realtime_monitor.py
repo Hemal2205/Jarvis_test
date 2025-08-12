@@ -12,10 +12,20 @@ from typing import Dict, List, Any, Optional, Callable
 from datetime import datetime, timedelta
 import threading
 from collections import defaultdict
-import pygetwindow as gw
-import pyautogui
 
 logger = logging.getLogger(__name__)
+
+# Gracefully import GUI-related libraries
+try:
+    import pygetwindow as gw
+    import pyautogui
+    DESKTOP_AUTOMATION_ENABLED = True
+except Exception:
+    gw = None
+    pyautogui = None
+    DESKTOP_AUTOMATION_ENABLED = False
+    logger.warning("Desktop automation libraries not available or display not found. Desktop features will be disabled in realtime_monitor.")
+
 
 class RealtimeMonitor:
     """Real-time system monitoring with proactive notifications"""
@@ -202,6 +212,8 @@ class RealtimeMonitor:
         
     def _monitor_user_activity(self):
         """Monitor user activity patterns"""
+        if not DESKTOP_AUTOMATION_ENABLED:
+            return
         try:
             # Get current mouse position
             mouse_pos = pyautogui.position()
@@ -217,6 +229,10 @@ class RealtimeMonitor:
             
     def _monitor_applications(self):
         """Monitor running applications and active window"""
+        if not DESKTOP_AUTOMATION_ENABLED:
+            self.system_status["applications"] = ["Desktop monitoring disabled"]
+            self.system_status["active_window"] = "Unknown"
+            return
         try:
             # Get all window titles
             windows = gw.getAllTitles()
