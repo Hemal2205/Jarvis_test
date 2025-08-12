@@ -14,3 +14,4 @@ passlib[bcrypt]==1.7.4
 python-jose[cryptography]==3.3.0
 Pillow==10.1.0
 python-xlib==0.33
+llama-cpp-python==0.2.20
