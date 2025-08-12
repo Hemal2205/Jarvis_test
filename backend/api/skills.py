@@ -41,43 +41,57 @@ async def get_skills(user_id: int = 1, db: Session = Depends(get_db)):
             "message": "Failed to retrieve skills"
         }, status_code=500)
 
-@router.post("/api/skills/start-learning")
-async def start_learning(request: dict, db: Session = Depends(get_db)):
-    """Start learning a new skill"""
+@router.post("/api/skills/learn")
+async def learn(request: dict, db: Session = Depends(get_db)):
+    """Start learning a new skill with real content"""
     try:
         user_id = request.get("user_id", 1)
-        skill_name = request.get("skill_name")
-        category = request.get("category", "General")
-        description = request.get("description", "")
+        topic = request.get("topic")
         
-        if not skill_name:
+        if not topic:
             return JSONResponse({
                 "success": False,
-                "message": "Skill name is required"
+                "message": "Topic is required"
             }, status_code=400)
         
+        # Use google_search to find learning resources
+        try:
+            from N.agent import google_search
+            search_results_str = await google_search(f"learn {topic} tutorial")
+            search_results = json.loads(search_results_str)
+        except Exception as search_error:
+            return JSONResponse({
+                "success": False,
+                "error": str(search_error),
+                "message": "Failed to search for learning resources."
+            }, status_code=500)
+
+        # Process search results
+        resources = [{"url": r.get('url'), "title": r.get('title')} for r in search_results.get('results', [])[:5]]
+        initial_topics = [r.get('snippet') for r in search_results.get('results', [])[:5]]
+
         # Check if skill already exists
         existing_skill = db.query(Skill).filter(
             Skill.user_id == user_id,
-            Skill.name == skill_name
+            Skill.name == topic
         ).first()
         
         if existing_skill:
             # Update existing skill
             existing_skill.last_updated = datetime.now()
-            existing_skill.description = description or existing_skill.description
+            existing_skill.resources = resources # Update resources
             db.commit()
             skill = existing_skill
         else:
             # Create new skill
             skill = Skill(
                 user_id=user_id,
-                name=skill_name,
-                description=description,
-                category=category,
+                name=topic,
+                description=f"A skill for learning about {topic}.",
+                category="General",
                 level="beginner",
                 mastery_score=0.1,
-                resources=[],
+                resources=resources,
                 last_updated=datetime.now(),
                 learned_at=datetime.now()
             )
@@ -89,16 +103,12 @@ async def start_learning(request: dict, db: Session = Depends(get_db)):
         session = LearningSession(
             user_id=user_id,
             skill_id=skill.id,
-            topic=skill_name,
+            topic=topic,
             duration=0,
             completion_rate=0.0,
             timestamp=datetime.now(),
             content_learned={
-                "initial_topics": [
-                    f"Introduction to {skill_name}",
-                    f"Basic concepts of {skill_name}",
-                    f"Getting started with {skill_name}"
-                ]
+                "initial_topics": initial_topics
             },
             questions_asked=[],
             practice_exercises=[]
@@ -109,7 +119,7 @@ async def start_learning(request: dict, db: Session = Depends(get_db)):
         
         return JSONResponse({
             "success": True,
-            "message": f"Started learning {skill_name}",
+            "message": f"Started learning {topic}",
             "skill": {
                 "id": skill.id,
                 "name": skill.name,

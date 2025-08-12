@@ -100,18 +100,56 @@ class EvolutionEngine:
         suggestion = db.query(EvolutionSuggestion).filter_by(id=suggestion_id).first()
         if not suggestion:
             return {"success": False, "message": "Suggestion not found"}
+
+        # Mark the suggestion as applied
         suggestion.status = 'applied'
+
+        details = f"Suggestion '{suggestion.description}' was applied."
+
+        # Create a new task for the agent based on the suggestion
+        if suggestion.agent_id:
+            new_task_description = ""
+            if suggestion.type == 'retry_logic':
+                new_task_description = f"Evolution Task: Implement retry logic for your core processing loop. Suggestion: {suggestion.description}"
+            elif suggestion.type == 'optimize_workflow':
+                new_task_description = f"Evolution Task: Analyze and optimize your workflow. Suggestion: {suggestion.description}"
+            elif suggestion.type == 'ai_suggestion':
+                new_task_description = f"Evolution Task: Review and integrate the following AI-generated suggestion: {suggestion.description}"
+
+            if new_task_description:
+                new_task = AutonomousAgentTask(
+                    agent_id=suggestion.agent_id,
+                    description=new_task_description,
+                    status='pending'
+                )
+                db.add(new_task)
+                details = f"Applied suggestion by creating a new task for agent {suggestion.agent_id}."
+
+
+        # Create a history record
         history = EvolutionHistory(
             suggestion_id=suggestion.id,
             action='applied',
             timestamp=datetime.utcnow(),
-            details=suggestion.description
+            details=details
         )
         db.add(history)
+
         if notification_manager:
-            notification_manager.create_notification(db, user_id=1, message=f"Suggestion '{suggestion.description}' was applied.")
+            notification_manager.create_notification(db, user_id=1, message=details)
+
         db.commit()
-        return {"success": True, "suggestion": suggestion}
+
+        # Refresh the suggestion object to reflect changes in the session
+        db.refresh(suggestion)
+
+        return {"success": True, "suggestion": {
+            "id": suggestion.id,
+            "agent_id": suggestion.agent_id,
+            "type": suggestion.type,
+            "description": suggestion.description,
+            "status": suggestion.status
+        }}
 
     def reject_suggestion(self, db: Session, suggestion_id: int):
         suggestion = db.query(EvolutionSuggestion).filter_by(id=suggestion_id).first()
